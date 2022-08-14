@@ -1,21 +1,17 @@
-import multiprocessing
-from unicodedata import digit
 import numpy as np
 import pandas as pd
 import pickle
-import time
+from scipy.stats import mode
 
 class Node:
-    def __init__(self, id, parent = None):
-        self.id = id
+    def __init__(self, parent = None):
         self.parent_node = parent
         self.left_node = None
         self.right_node = None
         self.threshold = None
         self.clss = None
         self.level = None
-        self.variable = None
-        self.gini = None
+        self.entropy = None
         self.isLeaf = False
 
     def getParent(self):
@@ -37,17 +33,16 @@ class Node:
             print("RIGHT:", self.getRight().threshold, " ", self.getRight().clss)
             self.getRight().getInfo(depth+1)
 
-    def getNodeByThreshold(self, value, level):
-        #if value[level] <= self.threshold:
+    def getNodeClassByThreshold(self, value, level):
         if value[self.level] <= self.threshold:
             if self.left_node != None:
-                return(self.left_node.getNodeByThreshold(value, level + 1))
+                return(self.left_node.getNodeClassByThreshold(value, level + 1))
             else:
                 return(self.clss)
                 
         else:
             if self.right_node != None:
-                return(self.right_node.getNodeByThreshold(value, level + 1))
+                return(self.right_node.getNodeClassByThreshold(value, level + 1))
             else:
                 return(self.clss)
     
@@ -60,22 +55,16 @@ class Node:
     def setThreshold(self, threshold):
         self.threshold = threshold
 
-    def setGini(self, gini):
-        self.gini = gini
+    def setEntropy(self, entropy):
+        self.entropy = entropy
 
 
 class Tree:
     def __init__(self, depth):
         self.depth = depth
         self.classes = None
-        self.root = Node(0)
+        self.root = Node()
         self.structure = [self.root]
-
-    #def isLeaf(self, node):
-    #    if node.getLeft == None and node.getRight == None:
-    #        return(False)
-    #    else:
-    #        return(True)
         
     def export_tree(self, file = "tree"):
         data = {"depth": self.depth, "classes": self.classes, "root": self.root, "structure": self.structure}
@@ -89,37 +78,38 @@ class Tree:
         self.structure = parameters["structure"]
 
     def get_tree(self):
-        print("ROOT NODE:", self.structure[0].threshold)
+        print("ROOT NODE:", self.root.threshold)
         self.root.getInfo(0)
 
-    def getNodeByID(self, id):
-        for node in self.structure:
-            if node.id == id:
-                return(node)
-
-    def classify(self, data):
+    def test(self, data):
         i = 0
         for idx, x in data.iterrows():
-            clss = self.root.getNodeByThreshold(x, 0)
+            clss = self.root.getNodeClassByThreshold(x, 0)
             if clss == x[-1]:
                 i = i + 1
         return(i)
 
+    def classify(self, data):
+        classifications = []
+        for idx, x in data.iterrows():
+            clss = self.root.getNodeClassByThreshold(x, 0)
+            classifications.append(clss)
+        return(classifications)
+
     def entropyf(self, data):
         val = 0
-        for clss in self.classes:
+        for clss in set(data.iloc[:,-1]):
             prob = data[data.iloc[:,-1] == clss].shape[0]/data.shape[0]
-            if prob != 0:
-                val = val - prob*np.log(prob)
+            val = val - prob*np.log(prob)
         return(val)
 
     def best_split(self, data, attribute, parent):
         best_left_data = None
         best_right_data = None
-        best_gini_left = None
-        best_gini_right = None
+        best_entropy_left = None
+        best_entropy_right = None
         best_IG = 0
-        for attribute in range(0, data.shape[1]-1, 5): #TO DO: CHANGE ATTRIBUTE LOOPING
+        for attribute in range(0, data.shape[1]-1, 2):
             if len(set(data.iloc[:,attribute])) <= 20:
                 values = set(data.iloc[:,attribute])
             else:
@@ -128,26 +118,25 @@ class Tree:
                 left_data = data[data.iloc[:,attribute] <= value]
                 right_data = data[data.iloc[:,attribute] > value]
                 if left_data.shape[0] == 0:
-                    gini_left = 0
+                    entropy_left = 0
                 else:
-                    gini_left = self.entropyf(left_data)
+                    entropy_left = self.entropyf(left_data)
 
                 if right_data.shape[0] == 0:
-                    gini_right = 0
+                    entropy_right = 0
                 else:
-                    gini_right = self.entropyf(right_data)
+                    entropy_right = self.entropyf(right_data)
 
-                IG = parent.gini - gini_left*(left_data.shape[0]/data.shape[0]) - gini_right*(right_data.shape[0]/data.shape[0])
+                IG = parent.entropy - entropy_left*(left_data.shape[0]/data.shape[0]) - entropy_right*(right_data.shape[0]/data.shape[0])
                 if IG >= best_IG:
                     best_IG = IG
                     best_left_data = left_data
                     best_right_data = right_data
-                    best_gini_left = gini_left
-                    best_gini_right = gini_right
+                    best_entropy_left = entropy_left
+                    best_entropy_right = entropy_right
                     parent.threshold = value
                     parent.level = attribute
-        print(best_left_data.shape)
-        return([best_left_data, best_right_data, best_gini_left, best_gini_right])
+        return([best_left_data, best_right_data, best_entropy_left, best_entropy_right])
 
     def set_classes(self, data):
         self.classes = set(data.iloc[:,-1])
@@ -164,109 +153,74 @@ class Tree:
             node.isLeaf = True
         node.clss = best_clss
 
-    def append(self, data, attribute, parent, depth, queue = multiprocessing.Queue()):
+    def append(self, data, attribute, parent, depth, progress = 0):
         self.set_node_class(parent, data)
-        left_data, right_data, left_gini, right_gini = self.best_split(data, attribute, parent)
-        if depth == 0:
-            queue.put(0)
-            queue.put(parent)
-        
-        if (left_data.shape[0] > 20 and self.depth > depth) and (attribute < data.shape[1] - 2 and not parent.isLeaf):
-            self.structure.append(Node(len(self.structure), parent))
+        left_data, right_data, left_entropy, right_entropy = self.best_split(data, attribute, parent)
+        if (left_data.shape[0] > 20 and self.depth > depth) and not parent.isLeaf:
+            self.structure.append(Node(parent))
             parent.setLeft(self.structure[-1])
-            parent.getLeft().gini = left_gini
-            queue.put(1)
-            queue.put(parent.getLeft())
-            print(parent.getLeft().)
-            queue.put(parent.id)
-                #parent.setLeft(queue.get())
+            parent.getLeft().entropy = left_entropy
+            progress = self.append(left_data, attribute + 1, parent.getLeft(), depth + 1, progress)
+        else:
+            progress = progress + 1/(2**(depth+1))
+            print(progress)
 
-            #if depth == 0:               
-            #    process_left = multiprocessing.Process(target = self.append, args = (left_data, attribute + 1, parent.getLeft(), depth + 1, queue))
-            #    process_left.start()
-            #else:
-            self.append(left_data, attribute + 1, parent.getLeft(), depth + 1, queue)
-
-        if (right_data.shape[0] > 20 and self.depth > depth) and (attribute < data.shape[1] - 2 and not parent.isLeaf):
-            self.structure.append(Node(len(self.structure), parent))
+        if (right_data.shape[0] > 20 and self.depth > depth) and not parent.isLeaf:
+            self.structure.append(Node(parent))
             parent.setRight(self.structure[-1])
-            parent.getRight().gini = right_gini
-            queue.put(2)
-            queue.put(parent.getRight())
-            queue.put(parent.id)
-            #if depth == 0:                
-            #    process_right = multiprocessing.Process(target = self.append, args = (right_data, attribute + 1, parent.getRight(), depth + 1))
-            #    process_right.start()
-            #else:
-            self.append(right_data, attribute + 1, parent.getRight(), depth + 1, queue)
-        
-        if depth == 0:
-            print("fdsfds")
-            print(self.structure)
-            #print(self.root.getLeft())
-            #process_left.join()
-            #self.root.setLeft(parent.getLeft())
-        return()
+            parent.getRight().entropy = right_entropy
+            progress = self.append(right_data, attribute + 1, parent.getRight(), depth + 1, progress)   
+        else:
+            progress = progress + 1/(2**(depth+1))
+            print(progress)
+
+        return(progress)
 
     def build_tree(self, data):
         self.set_classes(data)
-        self.root.gini = self.entropyf(data)
-        queue = multiprocessing.Queue()
-        append_process = multiprocessing.Process(target = self.append, args = (data, 0, self.root, 0, queue))
-        append_process.start()
-        while append_process.exitcode == None:
-            #while not queue.empty():
-                #self.structure.append(queue.get())
-                #print("aaaaaaa")
-            while not queue.empty():
-                state = queue.get()
-                print(state)
-                if state == 1:
-                    self.structure.append(queue.get())
-                    self.getNodeByID(queue.get()).setLeft(self.structure[-1])
-                elif state == 2:
-                    self.structure.append(queue.get())
-                    self.getNodeByID(queue.get()).setRight(self.structure[-1])
-                else:
-                    self.structure[0] = queue.get()
-                    self.root = self.structure[0]
-        #self.structure.append(queue.get())
-        append_process.join()
-        print(self.structure)
-            #self.structure.append(queue.get())
+        self.root.entropy = self.entropyf(data)
+        self.append(data, 0, self.root, 0)
 
+class Forest:
+    def __init__(self):
+        self.trees = [] 
 
-        #self.append(data, 0, self.root, 0)
+    def export_forest(self, file = "forest"):
+        data = {"trees": self.trees}
+        pickle.dump(data, open(file+".p", "wb"))
+    
+    def import_forest(self, file = "forest"):
+        parameters = pickle.load(open(file+".p", "rb")) 
+        self.trees = parameters["trees"]
 
+    def build_forest(self, num_of_trees, data, trees_size, data_split_size):
+        for _ in range(num_of_trees):
+            self.trees.append(Tree(trees_size))
+            sample = data.sample(data_split_size)
+            self.trees[-1].build_tree(sample)
 
-if __name__ =='__main__':
-    decision_tree = Tree(700)
-    csv_url = 'https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data'
-    col_names = ['Sepal_Length','Sepal_Width','Petal_Length','Petal_Width','Class']
-    iris =  pd.read_csv(csv_url, names = col_names)
+    def test(self, data):
+        decisions = pd.DataFrame()
+        correct = 0
+        for i, tree in enumerate(self.trees):
+            decisions.insert(i,i, tree.classify(data))
+        final_decision = []
+        for idx, row in decisions.iterrows():
+            final_decision.append(mode(row)[0][0])
+            if final_decision[idx] == data.iloc[idx, data.shape[1]-1]:
+                correct = correct + 1
+        return(correct/len(data))
 
-    column1 = [-3.2,2,-1,-3.8,-6.7,0.9,-1.8,-0.4,-1.8,2.5]
-    column2 = [2.8,1.8,-6.4,-8.1,6.8,8.9,11.9,0,-6.8,7.5]
-    column3 = [1,0,1,1,1,0,0,1,1,0]
-    data = pd.DataFrame({1:column1, 2:column2, "label":column3})
+digits = pd.read_csv("train.csv")
+test_data = pd.read_csv("test.csv")
+test_data_results = pd.read_csv("digit_classifier.csv")
+test_data['class'] = test_data_results['Label']
 
-    digits = pd.read_csv("train.csv")
-    test_data = pd.read_csv("test.csv")
-    test_data_results = pd.read_csv("digit_classifier.csv")
+idx = list([i for i in range(1,785)])
+idx.append(0)
+digits = digits.iloc[:,idx]
 
-    test_data['class'] = test_data_results['Label']
-
-    idx = list([i for i in range(1,785)])
-    idx.append(0)
-    digits = digits.iloc[:,idx]
-    #iris = iris.sample(150)
-    #print(iris.iloc[100:150,])
-    #decision_tree.import_tree()
-    start = time.time()
-    decision_tree.build_tree(digits.iloc[0:100,:])
-    end = time.time()
-    print("czas: ",end-start)
-    print(decision_tree.root.getLeft())
-    decision_tree.get_tree()
-    #decision_tree.export_tree()
-    print(decision_tree.classify(test_data))
+random_forest = Forest()
+random_forest.build_forest(6, digits, 100, 10000)
+random_forest.export_forest()
+print(random_forest.test(test_data))
